@@ -54,7 +54,7 @@ Set-Content -LiteralPath (Join-Path $infoRoot 'installer.ini') -Value $installer
 $installerVersion = '3.9.22'
 $installerSha = '689456f1fb1320c45e82a077afe6b87fb388fd3f75c41d9ee9ce8d45f3966b67'
 $installerFilename = "PortableApps.comInstaller_$installerVersion.paf.exe"
-$installerUrl = "https://downloads.sourceforge.net/project/portableapps/PortableApps.com%20Installer/$installerFilename?download"
+$installerUrl = "https://downloads.sourceforge.net/project/portableapps/PortableApps.com%20Installer/${installerFilename}?download"
 $workRoot = Join-Path $env:RUNNER_TEMP 'vscodium-paf-tools'
 $downloadFile = Join-Path $workRoot $installerFilename
 $installRoot = Join-Path $workRoot 'portableapps-tools'
