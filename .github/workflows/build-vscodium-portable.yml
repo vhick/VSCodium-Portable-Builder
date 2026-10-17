@@ -1,0 +1,61 @@
+name: Build VSCodium True Portable (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Official VSCodium stable release (example: 1.140.06880)"
+        type: string
+        required: true
+        default: "1.140.06880"
+      architecture:
+        description: "Your Windows PC type (usually x64)"
+        type: choice
+        required: true
+        default: x64
+        options:
+          - x64
+          - arm64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vscodium-portable-builder
+  cancel-in-progress: false
+
+jobs:
+  package-windows-portable:
+    name: Package official Windows portable ZIP
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Get builder files
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Test packaging and portable-folder safety
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+
+      - name: Download and verify official VSCodium release; create portable ZIP
+        shell: pwsh
+        env:
+          VSCODIUM_VERSION: ${{ inputs.release_version }}
+          VSCODIUM_ARCHITECTURE: ${{ inputs.architecture }}
+          GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          python builder/build_portable.py --version "$env:VSCODIUM_VERSION" --architecture "$env:VSCODIUM_ARCHITECTURE"
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed. Check the error above.' }
+
+      - name: Upload ZIP for download
+        uses: actions/upload-artifact@v4
+        with:
+          name: VSCodium-TruePortable-${{ inputs.release_version }}-${{ inputs.architecture }}
+          path: dist/VSCodiumPortable-*.zip
+          if-no-files-found: error
+          retention-days: 7
