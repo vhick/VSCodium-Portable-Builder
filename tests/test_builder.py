@@ -1,128 +1,162 @@
-"""Offline-only safety and layout tests. No downloads or GitHub credentials required."""
+"""Offline safety/layout checks. These don't pretend to test the Windows executable."""
 from __future__ import annotations
-
-import hashlib
-from pathlib import Path
 import sys
+from pathlib import Path
 import tempfile
 import unittest
 import zipfile
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).parents[1] / "builder"))
+sys.path.insert(0, str(Path(__file__).parents[1] / 'builder'))
 from build_portable import (
-    BuildError, expected_asset, choose_asset, _validate_members,
-    unpack_official_zip, enable_portable_mode, create_zip, fetch_release
+    BuildError, expected_asset, choose_asset, _validate_members, unpack_official_zip,
+    enable_portable_mode, create_zip, fetch_release,
 )
-
-VERSION = "1.140.06880"
-NAME = f"VSCodium-win32-x64-{VERSION}.zip"
-TEST_SHA = "0" * 64
+VERSION = '1.140.06880'
+NAME = f'VSCodium-win32-x64-{VERSION}.zip'
+TEST_SHA = '0' * 64
 
 
 def fixture_release():
-    return {
-        "tag_name": VERSION,
-        "draft": False,
-        "prerelease": False,
-        "assets": [{
-            "name": NAME,
-            "state": "uploaded",
-            "size": 200_000_000,
-            "digest": "sha256:" + TEST_SHA,
-            "browser_download_url": "https://github.com/VSCodium/vscodium/releases/download/"
-                                    + VERSION + "/" + NAME,
-        }],
-    }
+    return {'tag_name': VERSION, 'draft': False, 'prerelease': False,
+            'assets': [{'name': NAME, 'state': 'uploaded', 'size': 200_000_000,
+                        'digest': 'sha256:' + TEST_SHA,
+                        'browser_download_url': 'https://github.com/VSCodium/vscodium/releases/download/' + VERSION + '/' + NAME}]}
+
+
+def dummy_official_zip(path, inner_data=False):
+    with zipfile.ZipFile(path, 'w') as z:
+        z.writestr('VSCodium.exe', 'fake EXE for offline structure test')
+        z.writestr('resources/app/product.json', '{}')
+        z.writestr('bin/codium.cmd', '@echo off')
+        if inner_data:
+            z.writestr('data/user-data/my-settings.json', 'critical data')
+
+
+def dummy_launcher(root):
+    (root / 'VSCodiumPortable.exe').write_bytes(b'Mock compiled launcher, NOT REAL EXE')
+    app_info = root / 'App' / 'AppInfo'
+    for icon in ('appicon.ico', 'appicon_16.png', 'appicon_32.png', 'appicon_128.png'):
+        (app_info / icon).write_bytes(b'Mock icon')
 
 
 class BuilderTests(unittest.TestCase):
     def test_paginated_release_assets(self):
         release = fixture_release()
-        release["id"] = 12345
-        release["assets"] = []  # truncated release metadata
-        first_page = [{"name": f"unrelated-{n}"} for n in range(100)]
-        second_page = fixture_release()["assets"]
-        with patch("build_portable._github_api_json", side_effect=[release, first_page, second_page]) as mocked:
-            full_release = fetch_release(VERSION)
+        release['id'] = 12345
+        release['assets'] = []
+        page_one = [{'name': f'unrelated-{i}'} for i in range(100)]
+        page_two = fixture_release()['assets']
+        with patch('build_portable._github_api_json', side_effect=[release, page_one, page_two]) as mocked:
+            found = fetch_release(VERSION)
         self.assertEqual(mocked.call_count, 3)
-        self.assertEqual(len(full_release["assets"]), 101)
-        self.assertEqual(choose_asset(full_release, VERSION, "x64")["name"], NAME)
+        self.assertEqual(choose_asset(found, VERSION, 'x64')['name'], NAME)
 
-    def test_stable_release_asset_selection(self):
-        a = choose_asset(fixture_release(), VERSION, "x64")
-        self.assertEqual(a["name"], NAME)
-        self.assertEqual(expected_asset(VERSION, "arm64"),
-                         f"VSCodium-win32-arm64-{VERSION}.zip")
+    def test_choose_asset(self):
+        self.assertEqual(choose_asset(fixture_release(), VERSION, 'x64')['name'], NAME)
+        self.assertEqual(expected_asset(VERSION, 'arm64'), f'VSCodium-win32-arm64-{VERSION}.zip')
 
-    def test_reject_beta_latest_and_version_injection(self):
-        for version in ("latest", "1.140.0-beta.1", "1.140.0/../../bad", "v1.140.06880"):
+    def test_version_restrictions(self):
+        for version in ('latest', 'v1.140.06880', '1.140.06880-beta.1', '1.140.06880/../../bad'):
             with self.subTest(version=version), self.assertRaises(BuildError):
-                expected_asset(version, "x64")
+                expected_asset(version, 'x64')
 
-    def test_reject_prerelease_and_draft(self):
-        for field in ("prerelease", "draft"):
+    def test_reject_beta_or_draft(self):
+        for key in ('prerelease', 'draft'):
             release = fixture_release()
-            release[field] = True
+            release[key] = True
             with self.assertRaises(BuildError):
-                choose_asset(release, VERSION, "x64")
+                choose_asset(release, VERSION, 'x64')
 
-    def test_reject_missing_or_bad_digest(self):
-        for digest in ("", None, "sha256:1234", "md5:" + TEST_SHA):
+    def test_sha256_required(self):
+        for value in (None, '', 'md5:' + TEST_SHA, 'sha256:abc'):
             release = fixture_release()
-            release["assets"][0]["digest"] = digest
+            release['assets'][0]['digest'] = value
             with self.assertRaises(BuildError):
-                choose_asset(release, VERSION, "x64")
+                choose_asset(release, VERSION, 'x64')
 
-    def test_reject_wrong_download_source(self):
+    def test_reject_unofficial_asset_url(self):
         release = fixture_release()
-        release["assets"][0]["browser_download_url"] = "https://example.org/fake.zip"
+        release['assets'][0]['browser_download_url'] = 'https://example.com/evil.zip'
         with self.assertRaises(BuildError):
-            choose_asset(release, VERSION, "x64")
+            choose_asset(release, VERSION, 'x64')
 
-    def test_reject_zip_traversal_and_symlink(self):
-        with tempfile.TemporaryDirectory() as temp:
-            zip_path = Path(temp) / "bad.zip"
-            with zipfile.ZipFile(zip_path, "w") as zf:
-                zf.writestr("../escape.txt", "bad")
-            with zipfile.ZipFile(zip_path) as zf, self.assertRaises(BuildError):
-                _validate_members(zf)
+    def test_reject_zip_path_traversal(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'bad.zip'
+            with zipfile.ZipFile(src, 'w') as z:
+                z.writestr('../escape.txt', 'bad')
+            with zipfile.ZipFile(src) as z, self.assertRaises(BuildError):
+                _validate_members(z)
 
-    def test_reject_preexisting_data(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "input.zip"
-            out = Path(temp) / "VSCodiumPortable"
-            with zipfile.ZipFile(path, "w") as zf:
-                zf.writestr("VSCodium.exe", "mock exe")
-                zf.writestr("resources/a.txt", "a")
-                zf.writestr("data/user-data/existing-user.json", "secret")
-            out.mkdir()
+    def test_reject_upstream_with_data(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'official.zip'
+            dummy_official_zip(src, inner_data=True)
             with self.assertRaises(BuildError):
-                unpack_official_zip(path, out)
+                unpack_official_zip(src, Path(d) / 'App' / 'VSCodium')
 
-    def test_build_portable_zip_preserves_structure(self):
-        with tempfile.TemporaryDirectory() as temp:
-            tmp = Path(temp)
-            src = tmp / "upstream.zip"
-            with zipfile.ZipFile(src, "w") as zf:
-                zf.writestr("VSCodium.exe", "mock exe")
-                zf.writestr("resources/app/product.json", "{}")
-                zf.writestr("bin/codium.cmd", "@echo off")
-            root = tmp / "VSCodiumPortable"
-            root.mkdir()
-            unpack_official_zip(src, root)
-            enable_portable_mode(root, VERSION, "x64", "a" * 64)
-            result = tmp / "portable.zip"
-            create_zip(root, result)
-            with zipfile.ZipFile(result) as zf:
-                self.assertIn("VSCodiumPortable/VSCodium.exe", zf.namelist())
-                for suffix in ("data/", "data/user-data/", "data/extensions/", "data/tmp/"):
-                    self.assertIn("VSCodiumPortable/" + suffix, zf.namelist())
-                info = zf.read("VSCodiumPortable/PORTABLE-README.txt").decode("utf-8")
-                self.assertIn("1.140.06880", info)
-                self.assertIn("back up data/", info)
-                self.assertNotIn("App\\VSCodium", info)
+    def test_output_layout_and_launcher_configuration(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / 'official.zip'
+            dummy_official_zip(src)
+            root = tmp / 'VSCodiumPortable'
+            unpack_official_zip(src, root / 'App' / 'VSCodium')
+            enable_portable_mode(root, VERSION, 'x64', 'a' * 64)
+            self.assertFalse((root / 'App/VSCodium/data').exists())
+            self.assertTrue((root / 'Data/VSCodium/user-data').is_dir())
+            config = (root / 'App/AppInfo/Launcher/VSCodiumPortable.ini').read_text()
+            self.assertIn(r'VSCODE_PORTABLE=%PAL:DataDir%\VSCodium', config)
+            self.assertIn(r'TMP=%PAL:DataDir%\VSCodium\tmp', config)
+            self.assertNotIn('\t', config)  # Don't let Python escape \t in Windows path!
+            dummy_launcher(root)
+            zip_path = tmp / 'output.zip'
+            create_zip(root, zip_path)
+            with zipfile.ZipFile(zip_path) as z:
+                files = z.namelist()
+                for path in ('VSCodiumPortable/VSCodiumPortable.exe',
+                             'VSCodiumPortable/App/VSCodium/VSCodium.exe',
+                             'VSCodiumPortable/App/AppInfo/appinfo.ini',
+                             'VSCodiumPortable/Data/VSCodium/user-data/',
+                             'VSCodiumPortable/Data/VSCodium/extensions/',
+                             'VSCodiumPortable/Data/VSCodium/tmp/',
+                             'VSCodiumPortable/Other/README-PORTABLE.txt'):
+                    self.assertIn(path, files)
+                self.assertNotIn('VSCodiumPortable/data/', files)
+                self.assertFalse(any(x.startswith('VSCodiumPortable/App/VSCodium/data/') for x in files))
+
+    def test_package_rejects_missing_launcher(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / 'upstream.zip'
+            dummy_official_zip(src)
+            root = tmp / 'VSCodiumPortable'
+            unpack_official_zip(src, root / 'App/VSCodium')
+            enable_portable_mode(root, VERSION, 'x64', 'a' * 64)
+            with self.assertRaises(BuildError):
+                create_zip(root, tmp / 'no-launcher.zip')
+
+    def test_package_rejects_app_local_data(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / 'upstream.zip'
+            dummy_official_zip(src)
+            root = tmp / 'VSCodiumPortable'
+            unpack_official_zip(src, root / 'App/VSCodium')
+            enable_portable_mode(root, VERSION, 'x64', 'a' * 64)
+            dummy_launcher(root)
+            (root / 'App/VSCodium/data').mkdir()
+            with self.assertRaises(BuildError):
+                create_zip(root, tmp / 'bad.zip')
+
+    def test_launcher_uses_native_portable_env_without_folder_moves(self):
+        launcher = (Path(__file__).parents[1] / 'builder/VSCodiumPortable.cs').read_text()
+        self.assertIn('start.EnvironmentVariables["VSCODE_PORTABLE"] = dataDir;', launcher)
+        self.assertIn('Directory.CreateDirectory(Path.Combine(dataDir, "extensions"));', launcher)
+        self.assertIn('Directory.Exists(innerData)', launcher)
+        self.assertIn('Process.Start(start)', launcher)
+        self.assertNotIn('Directory.Move(', launcher)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

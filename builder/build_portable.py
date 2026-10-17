@@ -1,8 +1,9 @@
 """Community VSCodium portable ZIP packager.
 
 Uses ONLY official GitHub release ZIP assets. Explicit stable tag + SHA-256
-verification. Activates native VSCodium portable mode by placing ``data`` next
-to ``VSCodium.exe``; no new executables or registry changes.
+verification. Stages the Windows editor under App/VSCodium and portable state
+under Data/VSCodium, to be connected by a separately compiled launcher setting
+VSCODE_PORTABLE. Does not build VSCodium itself.
 
 Runs using Python 3.13 on a GitHub-hosted Windows runner.
 """
@@ -161,6 +162,8 @@ def _validate_members(zf: zipfile.ZipFile) -> None:
 
 
 def unpack_official_zip(src: Path, target: Path) -> None:
+    """Extract original VSCodium binaries into App/VSCodium."""
+    target.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(src) as zf:
             _validate_members(zf)
@@ -178,36 +181,116 @@ def unpack_official_zip(src: Path, target: Path) -> None:
         candidates[0].rmdir()
     if not exe.is_file() or not (target / "resources").is_dir():
         raise BuildError("Upstream ZIP does not have the expected VSCodium Windows layout.")
-    data_dir = target / "data"
-    if data_dir.exists() and any(data_dir.iterdir()):
-        raise BuildError("Upstream archive already contains nonempty data; refusing to overwrite.")
+    # Native mode must not write within App, even when somebody runs the inner EXE.
+    # Any bundled data might be user data; fail closed rather than deleting it.
+    if (target / "data").exists():
+        raise BuildError("Unexpected upstream App/VSCodium/data; cannot safely separate application data.")
 
 
-def enable_portable_mode(target: Path, version: str, architecture: str, source_sha: str) -> None:
-    data_dir = target / "data"
+def enable_portable_mode(root: Path, version: str, architecture: str, source_sha: str) -> None:
+    """Prepare PortableApps.com-style structure (not a PAF installer)."""
+    data_dir = root / "Data" / "VSCodium"
     for name in ("user-data", "extensions", "tmp"):
         folder = data_dir / name
         folder.mkdir(parents=True, exist_ok=True)
-        # A real file ensures GitHub ZIP downloads preserve the initially empty folders.
-        (folder / ".keep").write_text("Created by portable builder; safe to leave in place.\n", encoding="utf-8")
-    (target / "PORTABLE-README.txt").write_text(
-        "VSCODIUM PORTABLE (COMMUNITY PACKAGE)\n"
-        "\nOpen VSCodium.exe from THIS folder. Native portable mode is enabled by data/.\n"
-        "Settings, extensions and editor state are saved in data/.\n"
-        "For upgrades, back up data/, then move the old data/ directory into a\n"
-        "freshly extracted new version, replacing the new EMPTY data/ directory.\n"
-        "Never mix application files from different versions.\n"
-        "Some extensions and external tools may write to the Windows user profile.\n"
-        "This package is not endorsed by the VSCodium developers.\n"
-        f"\nVersion: {version}\nArchitecture: Windows {architecture}\n"
-        f"Verified source ZIP SHA-256: {source_sha}\n"
-        "Official releases: https://github.com/VSCodium/vscodium/releases\n",
+        (folder / ".keep").write_text("Empty initial portable directory.\n", encoding="utf-8")
+    info_dir = root / "App" / "AppInfo"
+    launcher_info = info_dir / "Launcher"
+    launcher_info.mkdir(parents=True, exist_ok=True)
+    appinfo = f"""[Format]
+Type=PortableApps.comFormat
+Version=3.9
+
+[Details]
+Name=VSCodium Portable (Community)
+AppID=VSCodiumPortableCommunity
+Publisher=VSCodium Contributors; Community Portable Packaging
+Homepage=https://github.com/VSCodium/vscodium
+Category=Development
+Description=Portable community package of the free VSCodium editor.
+Language=Multilingual
+
+[License]
+Shareable=true
+OpenSource=true
+Freeware=true
+CommercialUse=true
+
+[Version]
+PackageVersion={version}.0
+DisplayVersion={version}
+
+[Control]
+Icons=1
+Start=VSCodiumPortable.exe
+"""
+    (info_dir / "appinfo.ini").write_text(appinfo, encoding="utf-8")
+    (launcher_info / "VSCodiumPortable.ini").write_text(
+        r"""; Optional recipe if switching to the official PortableApps.com Launcher.
+; The package itself contains a custom community launcher.
+[Launch]
+ProgramExecutable=VSCodium\VSCodium.exe
+WorkingDirectory=%PAL:AppDir%\VSCodium
+SinglePortableAppInstance=true
+
+[Environment]
+VSCODE_PORTABLE=%PAL:DataDir%\VSCodium
+TMP=%PAL:DataDir%\VSCodium\tmp
+TEMP=%PAL:DataDir%\VSCodium\tmp
+""", encoding="utf-8"
+    )
+    docs = root / "Other" / "Source"
+    docs.mkdir(parents=True, exist_ok=True)
+    (docs / "Build-Information.txt").write_text(
+        "VSCodium Portable (Community)\n"
+        f"Version: {version}\nArchitecture: Windows {architecture}\n"
+        f"Official ZIP SHA-256: {source_sha}\n"
+        "Official source: https://github.com/VSCodium/vscodium\n"
+        "The custom portable launcher uses VSCODE_PORTABLE and no folder moves.\n"
+        "This is not an official VSCodium or PortableApps.com build.\n",
+        encoding="utf-8",
+    )
+    (root / "Other" / "README-PORTABLE.txt").write_text(
+        "VSCODIUM PORTABLE - COMMUNITY BUILD\n\n"
+        "Open VSCodiumPortable.exe in the root folder.\n"
+        "Settings, extensions, and temporary files are saved in Data/VSCodium.\n"
+        "The launcher sets VSCODE_PORTABLE for VSCodium only, without changing the Windows PATH or registry.\n\n"
+        "UPDATE: Close all VSCodium processes. Back up your Data folder.\n"
+        "Replace App, Other, and VSCodiumPortable.exe; never overwrite or delete Data.\n\n"
+        "OLD PACKAGING FORMAT MIGRATION: If you previously used an archive with VSCodium.exe in\n"
+        "the root and data/ beside it, copy the old data/user-data and data/extensions\n"
+        "folders into this package's Data/VSCodium directory (replacing only the empty placeholders).\n"
+        "Do not keep two separate active portable data directories.\n\n"
+        "Native Windows traces and third-party extensions/external tools can still use the host PC.\n"
+        "Do not claim all plugins are self-contained without checking them.\n",
         encoding="utf-8",
     )
 
 
 def create_zip(portable_root: Path, output: Path) -> None:
+    """Package only if compiled Windows launcher, metadata, and data storage exist."""
     output.parent.mkdir(parents=True, exist_ok=True)
+    required_paths = (
+        "VSCodiumPortable.exe",
+        "App/VSCodium/VSCodium.exe",
+        "App/VSCodium/resources",
+        "App/AppInfo/appinfo.ini",
+        "App/AppInfo/appicon.ico",
+        "App/AppInfo/appicon_16.png",
+        "App/AppInfo/appicon_32.png",
+        "App/AppInfo/appicon_128.png",
+        "App/AppInfo/Launcher/VSCodiumPortable.ini",
+        "Data/VSCodium/user-data",
+        "Data/VSCodium/extensions",
+        "Data/VSCodium/tmp",
+        "Other/README-PORTABLE.txt",
+        "Other/Source/Build-Information.txt",
+    )
+    missing = [p for p in required_paths if not (portable_root / p).exists()]
+    if missing:
+        raise BuildError("Missing mandatory package components: " + ", ".join(missing))
+    if (portable_root / "App/VSCodium/data").exists():
+        raise BuildError("Data must not reside under App/VSCodium: upgrade could erase it!")
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6,
                          allowZip64=True) as zf:
         for p in sorted(portable_root.rglob("*")):
@@ -217,18 +300,21 @@ def create_zip(portable_root: Path, output: Path) -> None:
             else:
                 zf.write(p, rel)
     with zipfile.ZipFile(output) as zf:
-        archive_names = set(zf.namelist())
+        names = set(zf.namelist())
         required = {
-            "VSCodiumPortable/VSCodium.exe",
-            "VSCodiumPortable/data/",
-            "VSCodiumPortable/data/user-data/",
-            "VSCodiumPortable/data/extensions/",
-            "VSCodiumPortable/data/tmp/",
-            "VSCodiumPortable/PORTABLE-README.txt",
+            "VSCodiumPortable/VSCodiumPortable.exe",
+            "VSCodiumPortable/App/VSCodium/VSCodium.exe",
+            "VSCodiumPortable/App/AppInfo/appinfo.ini",
+            "VSCodiumPortable/Data/VSCodium/user-data/",
+            "VSCodiumPortable/Data/VSCodium/extensions/",
+            "VSCodiumPortable/Data/VSCodium/tmp/",
+            "VSCodiumPortable/Other/README-PORTABLE.txt",
         }
-        missing = required - archive_names
+        missing = required - names
         if missing:
             raise BuildError(f"Portable ZIP verification failed; missing: {sorted(missing)}")
+        if any(name.startswith("VSCodiumPortable/App/VSCodium/data/") for name in names):
+            raise BuildError("A data directory was accidentally packaged under App/VSCodium")
         bad = zf.testzip()
         if bad:
             raise BuildError(f"CRC check failed for packaged file: {bad}")
@@ -236,6 +322,7 @@ def create_zip(portable_root: Path, output: Path) -> None:
 
 
 def build(version: str, architecture: str, output_dir: Path) -> Path:
+    """Stage files. compile_launcher.ps1 and package_staged.py finish afterward."""
     filename = expected_asset(version, architecture)
     print(f"Official upstream: {UPSTREAM}")
     print(f"Selected stable release: {version}; Windows architecture: {architecture}")
@@ -245,20 +332,20 @@ def build(version: str, architecture: str, output_dir: Path) -> Path:
         temp = Path(temp_path)
         incoming = temp / filename
         source_sha = download_verified(asset, incoming)
-        root = temp / "VSCodiumPortable"
-        root.mkdir()
-        unpack_official_zip(incoming, root)
+        root = output_dir / "VSCodiumPortable"
+        if root.exists():
+            raise BuildError("Refusing to overwrite an existing staging folder. Remove stage and retry.")
+        app = root / "App" / "VSCodium"
+        unpack_official_zip(incoming, app)
         enable_portable_mode(root, version, architecture, source_sha)
-        output = output_dir / f"VSCodiumPortable-{version}-win-{architecture}.zip"
-        create_zip(root, output)
-    return output
-
+        print(f"Staged checked source under: {root}")
+    return root
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Package official stable VSCodium for Windows portable mode")
     parser.add_argument("--version", required=True, help="Upstream version tag, e.g. 1.140.06880")
     parser.add_argument("--architecture", choices=ARCHITECTURES, required=True)
-    parser.add_argument("--output-dir", type=Path, default=Path("dist"))
+    parser.add_argument("--output-dir", type=Path, default=Path("stage"))
     args = parser.parse_args()
     try:
         build(args.version, args.architecture, args.output_dir)

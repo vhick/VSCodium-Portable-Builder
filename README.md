@@ -1,148 +1,139 @@
-# VSCodium True Portable — GitHub Actions Builder
+# VSCodium Portable Builder — Revised App / Data / Other Edition
 
-**A beginner-friendly, manual-only, standalone GitHub Actions builder for the official Windows ZIP edition of VSCodium.**
+**This is the corrected version of the previous builder kit.** It produces the **same top-level layout as YTSagePortable**, with a dedicated `VSCodiumPortable.exe` launcher, program files under `App`, and persistent settings/extensions inside `Data`.
 
-- No fork required. You only create a new builder repository of your own.
-- No application compilation, source patches, registry modifications, or custom launcher.
-- The official VSCodium ZIP is checked using the **SHA-256 digest reported by GitHub's release API** before being repackaged.
-- Native portable mode: `data/` is placed **right beside `VSCodium.exe`**, and includes `user-data/`, `extensions/` and `tmp/`.
-- Builds are **manual only**. You choose the stable version and Windows architecture (x64 or ARM64).
-- Output: portable ZIP downloaded from **Actions > Artifacts** (default retention: 7 days).
+**Status:** 12 offline packaging/security/layout tests passed. This is a prepared GitHub Actions builder kit — **not** the finished Windows app. The GitHub Actions Windows compilation and VSCodium runtime portability tests remain unverified.
 
-**Status:** The builder's offline tests pass. The actual GitHub Actions run, official download, and Windows portability behavior have **not yet been tested**. Running this workflow in GitHub completes that step.
-
-## Part A — Set up the builder (do this only once)
-
-### Step 1: Create a separate repository
-
-1. Sign in to your GitHub account and open https://github.com/new
-2. For **Repository name**, enter **VSCodium-Portable-Builder**.
-3. Choose **Public** (simplifies setup; never upload passwords or personal data).
-4. Select **no README, no .gitignore, no license** so the new repository is empty.
-5. Click **Create repository**. **Do not fork VSCodium.**
-
-### Step 2: Extract THIS builder kit ZIP
-
-Right-click the kit ZIP on your computer and select **Extract All**. Open the extracted folder. It contains:
+## The resulting portable application
 
 ```text
-.github/                   <- hidden folder; do not try to upload the folder itself
-  workflows/
-    build-vscodium-portable.yml
-builder/
-  build_portable.py
-tests/
-  test_builder.py
+VSCodiumPortable/
+  VSCodiumPortable.exe           <-- ALWAYS open this launcher
+  App/                            <-- REPLACE during upgrades
+    VSCodium/
+      VSCodium.exe                <-- internal program; do not launch directly
+      bin/
+      resources/
+      ... other upstream files ...
+    AppInfo/
+      appinfo.ini
+      appicon.ico
+      appicon_16.png
+      appicon_32.png
+      appicon_128.png
+      Launcher/VSCodiumPortable.ini
+  Data/                           <-- KEEP your existing Data during upgrades
+    VSCodium/
+      user-data/                  <-- settings, profiles, editor state
+      extensions/                 <-- extensions
+      tmp/                        <-- temp files
+  Other/
+    README-PORTABLE.txt
+    Source/Build-Information.txt
+```
+
+### Why the custom launcher is essential
+
+The official Windows ZIP normally enables portable mode by placing `data` next to `VSCodium.exe`. That is valid native portability, but it puts persistent user data **inside our `App/` folder**, creating a risk during upgrades that replace `App`.
+
+The underlying VS Code runtime also supports `VSCODE_PORTABLE` to choose a portable data directory. Our small Windows launcher creates `Data/VSCodium` and starts the **official, unmodified VSCodium.exe** with `VSCODE_PORTABLE` pointing to that directory. The runtime uses it for editor user-data, extensions and temp files. We do **not** move any directories before/after runs, create Windows junctions, or edit system-level environment variables. The launcher changes environment variables for the VSCodium process only.
+
+Official source: https://github.com/microsoft/vscode/blob/main/src/bootstrap-node.ts (`configurePortable`). VSCodium confirms that the Windows ZIP follows VS Code's portable-mode behavior: https://github.com/VSCodium/vscodium/blob/master/docs/usage.md
+
+## Update your EXISTING GitHub builder repository
+
+You do **not** need another builder repository, a fork, GitHub Desktop, or a command line.
+
+1. Download the **revised** builder kit ZIP and **Extract All** on Windows.
+2. Go to your existing **VSCodium-Portable-Builder** repository on GitHub. Open the **`builder`** folder. Click **Add file → Upload files**, then add/replace these four files from the extracted `builder` folder:
+   - `build_portable.py`
+   - `VSCodiumPortable.cs`
+   - `compile_launcher.ps1`
+   - `package_staged.py`
+3. Click **Commit changes**. This replaces the old Python builder and adds the new launcher source and packaging files.
+4. Go to the **`tests`** folder. Upload/replace the new `test_builder.py`. Commit.
+5. Go to the existing **`.github/workflows`** folder in your GitHub repository. Upload/replace **only** `build-vscodium-portable.yml` from the new kit's `.github/workflows` folder, then commit. **Do not upload `.github` itself**; use the folder already present on GitHub.
+6. Optional: replace the repository's `README.md` and `START-HERE.txt` with the new versions so your future instructions remain accurate.
+7. Verify the repository has the four builder files, revised test, and revised workflow. Then open **Actions → Build VSCodium True Portable (Manual)** and run the workflow.
+
+If your GitHub upload page will not accept a file with the same name, click the existing file in GitHub and use the pencil icon to **Edit file**, replacing the contents with the text from the revised file. Commit the change. GitHub Desktop is another option, but isn't required.
+
+### If you have not yet created a GitHub repository
+
+1. Go to https://github.com/new and create an empty public repository `VSCodium-Portable-Builder`. Do not add a README, .gitignore or license at creation.
+2. Extract the kit ZIP. Upload `builder/`, `tests/`, `README.md`, and `START-HERE.txt` into the empty repo. Commit.
+3. For the hidden `.github` folder, choose **Add file → Create new file** and type `.github/workflows/README.md`; type `Workflow folder` and commit. Then open `.github/workflows` in GitHub and upload **only** `build-vscodium-portable.yml`. Commit.
+4. Go to **Actions**, enable workflows if prompted, and run **Build VSCodium True Portable (Manual)**.
+
+## Running and downloading the build
+
+1. On GitHub open **Actions → Build VSCodium True Portable (Manual) → Run workflow**.
+2. For the first build use `release_version = 1.140.06880`, `architecture = x64` (or `arm64` if your computer runs Windows on ARM).
+3. Click **Run workflow** again to confirm. This workflow is **manual-only**, not automatic.
+4. Open the workflow run. A green checkmark means that its package and structural checks completed. Under **Artifacts**, download `VSCodium-TruePortable-1.140.06880-x64` (or your chosen version/architecture).
+5. Extract the downloaded GitHub artifact ZIP. Extract the `VSCodiumPortable-1.140.06880-win-x64-AppDataOther.zip` inside it.
+6. Open `VSCodiumPortable/` and run **`VSCodiumPortable.exe`**. Don't run `App/VSCodium/VSCodium.exe` by itself; bypassing the launcher may write to ordinary Windows profile directories.
+
+If the run is red, open the failed step and copy its error log. Source asset changes, GitHub availability, image extraction and Windows compiler issues can cause failures that offline unit tests cannot detect.
+
+## Safe updates — preserve your Data directory
+
+**When the new package has the same App/Data/Other structure:**
+
+1. Close VSCodium completely and back up the *old* `VSCodiumPortable/Data` folder.
+2. Download and extract the new portable package into a separate temporary folder.
+3. In your existing installation, **replace the entire `App` folder**, then copy `Other` and `VSCodiumPortable.exe` from the new package.
+4. **Do not replace, merge or delete your old `Data` folder.** The new ZIP contains empty starter data directories, not your personal settings.
+5. Launch the updated `VSCodiumPortable.exe`. Verify your extensions, settings and profiles.
+
+This procedure is the same as your YTSage Portable updating workflow.
+
+## Migrate existing settings from the PREVIOUS VSCodium builder ZIP
+
+If you **already ran the original VSCodium builder kit from our last reply**, its output uses a different layout:
+
+```text
+OLD: VSCodiumPortable/VSCodium.exe
+OLD: VSCodiumPortable/data/user-data
+OLD: VSCodiumPortable/data/extensions
+OLD: VSCodiumPortable/data/tmp
+```
+
+To migrate **once** to the corrected build:
+
+1. Completely close the old VSCodium and back up its entire **old `data` folder**.
+2. Extract the new corrected ZIP into an **entirely new folder**. Do not merge two different program layouts.
+3. From the **old** `VSCodiumPortable/data/` folder, copy `user-data/`, `extensions/`, and (if desired) `tmp/` into the **new** `VSCodiumPortable/Data/VSCodium/` folder. The new folders are empty except for `.keep` marker files.
+4. Start the **new** `VSCodiumPortable.exe`. Confirm your settings and extensions are present.
+5. Keep the old copy as a backup until everything works. After that, future updates only replace `App`, `Other` and the root launcher.
+
+## What is verified, and what isn't
+
+This kit includes offline tests that verify stable-release naming, upstream asset checksums, ZIP path safety, supported Windows architectures, required package contents, and that no persistent data directory is packaged under `App/VSCodium`. The build checks the published upstream GitHub release metadata and SHA-256 digest at runtime before downloading and packaging. The launcher is compiled using the Windows .NET Framework C# compiler already available on the GitHub-hosted Windows machine.
+
+**What is not yet proven:** successful execution of the full workflow on GitHub; the custom launcher actually running a VSCodium Windows session; no AppData or registry traces from third-party extensions. Portable Windows applications may still leave system-level execution traces, and tools run inside the editor (Git, Python, language servers, terminals, browser auth) may have their own host files. We do not claim otherwise without real Windows tests.
+
+## Included files
+
+```text
+.github/workflows/build-vscodium-portable.yml
+builder/build_portable.py
+builder/VSCodiumPortable.cs
+builder/compile_launcher.ps1
+builder/package_staged.py
+tests/test_builder.py
 README.md
 START-HERE.txt
 ```
 
-### Step 3: Upload the non-hidden contents
+This builder uses the **official VSCodium ZIP** — it does not compile VSCodium's upstream source and does not require a fork. It bundles a *community launcher* and includes PortableApps-compatible layout/metadata; **it does not automatically generate a `.paf.exe` installer**, and is not an officially approved PortableApps.com release.
 
-1. On your **VSCodium-Portable-Builder** GitHub page, click **uploading an existing file**. If you already have some files, use **Add file > Upload files**.
-2. From Windows File Explorer, drag in **`builder`**, **`tests`**, **`README.md`**, and **`START-HERE.txt`**. **Do not drag the downloaded ZIP**.
-3. Check that GitHub lists files under `builder/` and `tests/`, then **Commit changes**.
-4. **Do not upload `.github` here**. Use the next step instead.
+### Sources
 
-### Step 4: Create the special `.github/workflows` folder without uploading a dot-folder
+- VSCodium: https://github.com/VSCodium/vscodium
+- VSCodium portable guidance: https://github.com/VSCodium/vscodium/blob/master/docs/usage.md
+- VS Code runtime portable environment behavior: https://github.com/microsoft/vscode/blob/main/src/bootstrap-node.ts
+- PortableApps standard folder layout: https://portableapps.com/manuals/PortableApps.comLauncher/ref/paf/layout.html
+- GitHub manual workflow runs: https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow
 
-1. In your builder repo, click **Add file > Create new file**.
-2. For the new filename, type **`.github/workflows/README.md`**. GitHub creates both directories automatically after the slashes.
-3. In the body, type: `Workflow folder`.
-4. Click **Commit changes**. This placeholder is harmless.
-5. Return to the repo and navigate into **`.github` > `workflows`**.
-6. Click **Add file > Upload files**.
-7. On your computer, open the extracted kit's `.github/workflows/` folder, and **upload only** `build-vscodium-portable.yml`.
-8. Click **Commit changes**.
-
-Your GitHub repository should now contain:
-
-```text
-VSCodium-Portable-Builder/
-  .github/
-    workflows/
-      README.md
-      build-vscodium-portable.yml
-  builder/
-    build_portable.py
-  tests/
-    test_builder.py
-  README.md
-  START-HERE.txt
-```
-
-## Part B — Build VSCodium Portable
-
-1. Open your **VSCodium-Portable-Builder** repository on GitHub.
-2. Click **Actions**. If prompted, enable Actions in **your own** repository.
-3. Choose **Build VSCodium True Portable (Manual)** on the left.
-4. Click **Run workflow**.
-5. Set:
-   - **Branch:** `main` (or your repository's default branch)
-   - **release_version:** `1.140.06880` (initial verified release-name format; replace with a newer official **stable** tag when available)
-   - **architecture:** `x64` for most Windows desktops/laptops; `arm64` only for Windows-on-ARM computers.
-6. Click the green **Run workflow** button.
-7. A successful run shows a **green check**. Open that run, scroll to **Artifacts**, and download **VSCodium-TruePortable-1.140.06880-x64** (or your selected values).
-8. Extract the downloaded GitHub artifact ZIP. **Inside it is** `VSCodiumPortable-1.140.06880-win-x64.zip`.
-9. Extract that inner ZIP. Enter the **VSCodiumPortable** folder and double-click **`VSCodium.exe`**. Do not move it away from the adjacent **`data`** folder.
-
-If the run fails (red X), expand the failed step to read the error. A successful offline test does not guarantee the actual download/extraction succeeds; keep the error log for troubleshooting.
-
-### What the finished app looks like
-
-```text
-VSCodiumPortable/
-  VSCodium.exe      <-- launch this
-  bin/
-  resources/
-  ... other official program files ...
-  data/             <-- KEEP THIS during updates
-    user-data/      <-- settings, profiles, state
-    extensions/     <-- extensions
-    tmp/            <-- portable temporary directory
-  PORTABLE-README.txt
-```
-
-**Important:** For this editor, **do not** move application files under a separate `App/` folder unless `data/` also stays beside `VSCodium.exe`. The built-in portable mode requires the exact layout shown above.
-
-## Part C — Update safely (preserve ALL your current data)
-
-When an official new stable VSCodium release is available:
-
-1. Run the same GitHub Action again and enter **the exact new stable version** under `release_version`. Running without changing it rebuilds the old version.
-2. Download the new successful **Artifacts** ZIP. Extract both ZIP layers into a **NEW folder**. **Do not overwrite the old installation yet.**
-3. Close all existing VSCodium windows. Back up your old `VSCodiumPortable/data` folder to a safe location.
-4. Inside the **new** extracted `VSCodiumPortable`, **delete ONLY its new/empty `data` folder**. (This folder contains just the initial empty structure and `.keep` markers.)
-5. **Copy your old `data` folder** into the new `VSCodiumPortable` folder, directly beside the new `VSCodium.exe`.
-6. Start the **new** `VSCodium.exe`. Confirm your extensions, themes and settings remain.
-7. Once everything works, keep or archive your previous installation as a backup.
-
-**Never delete your old `data` folder before making a backup, and never merge program files from two versions.** If you already have an existing VSCodium portable ZIP installation, you can move its `data/` folder using these steps.
-
-## What this builder verifies
-
-- The selected release tag is exactly the stable version requested (not beta/draft).
-- The correct official Windows ZIP asset exists for your chosen x64/arm64 CPU.
-- The asset's download URL is an exact official GitHub release URL.
-- GitHub's uploaded asset SHA-256 checksum exists and matches downloaded bytes.
-- The ZIP contains expected Windows VSCodium program files; archive paths are checked.
-- Portable mode's `data/`, `user-data/`, `extensions/`, and `tmp/` exist.
-- The downloadable ZIP can be read without CRC errors.
-
-**No `.paf.exe` is produced.** This is a native self-contained Windows ZIP. Creating a PortableApps.com Format installer is a separate packaging project; making one by renaming `.zip` is invalid.
-
-## True portability limitations
-
-VSCodium's native portable mode redirects its own preferences, profiles, sessions, extensions and temporary folder as documented. It does **not** guarantee that every third-party extension, shell, Git, SSH client, compiler, language server or Windows credential service avoids writing elsewhere on the host. The app may also leave Windows-managed execution traces. **Test your installed extensions and external tools** if strict no-host-remnants portability is essential.
-
-This project does not activate Windows Explorer context menus or install shell integrations. The Windows ZIP version also does not automatically update itself; use the manual workflow again for future versions.
-
-## Authoritative references
-
-- Official VSCodium repository and releases: https://github.com/VSCodium/vscodium/releases
-- VSCodium portable-mode guidance: https://github.com/VSCodium/vscodium/blob/master/docs/index.md#how-do-i-run-vscodium-in-portable-mode
-- VS Code portable-mode technical details: https://code.visualstudio.com/docs/setup/portable
-- GitHub Actions manual run documentation: https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow
-- GitHub release API and SHA-256 asset digests: https://docs.github.com/en/rest/releases/assets
-
-Community-produced packaging only; not affiliated with VSCodium, Microsoft or PortableApps.com. VSCodium's original license and third-party notices remain embedded in the official ZIP.
+VSCodium's source, binaries and trademarks remain those of their respective authors. This packaging is a third-party community build and is not endorsed by them.
