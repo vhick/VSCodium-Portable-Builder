@@ -1,7 +1,7 @@
 # This script is ADDITIVE: it does not alter the existing portable ZIP builder.
-# It downloads PortableApps.com Installer from the publisher, checks the pinned
-# SHA256, installs this development tool on the temporary GitHub runner, then
-# builds the .paf.exe from the already-staged App/Data/Other portable layout.
+# It downloads an unchanged official PortableApps.com Installer from a GH Release
+# in the user's builder repository, verifies the PUBLISHER'S pinned SHA-256,
+# unpacks the builder, then compiles .paf.exe from App/Data/Other.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$Version,
@@ -44,95 +44,99 @@ $installerIni = @'
 [MainDirectories]
 RemoveAppDirectory=true
 RemoveOtherDirectory=true
+RemoveDataDirectory=false
 '@
 Set-Content -LiteralPath (Join-Path $infoRoot 'installer.ini') -Value $installerIni -Encoding ascii
 
-# Official stable Installer version and its SHA-256 as published on SourceForge.
-# Both are intentionally pinned. Update both from the official publisher when
-# newer versions appear; do not bypass integrity verification on failure.
+# This runner cannot reliably fetch PortableApps.com from SourceForge (403 responses).
+# User hosts an untouched official .paf.exe once as an ASSET of a GitHub Release
+# in their own PUBLIC builder repository. GitHub release assets are downloaded
+# on every subsequent workflow run; the official checksum remains mandatory.
 $installerVersion = '3.9.22'
 $installerSha = '689456f1fb1320c45e82a077afe6b87fb388fd3f75c41d9ee9ce8d45f3966b67'
 $installerFilename = "PortableApps.comInstaller_$installerVersion.paf.exe"
+$releaseTag = "portableapps-installer-tool-$installerVersion"
+$repoName = $env:GITHUB_REPOSITORY
+if ([string]::IsNullOrWhiteSpace($repoName) -or $repoName -notmatch '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$') {
+    throw 'GITHUB_REPOSITORY is missing. Run this script from your GitHub Actions builder repository.'
+}
+
 $workRoot = Join-Path $env:RUNNER_TEMP 'vscodium-paf-tools'
 $downloadFile = Join-Path $workRoot $installerFilename
-$installRoot = Join-Path $workRoot 'portableapps-tools'
-New-Item -ItemType Directory -Force -Path $workRoot, $installRoot, $outputRoot | Out-Null
-
-# SourceForge can return an error page or a stale mirror response instead of the
-# official executable. Download from the publisher's official mirror network,
-# retry via documented mirror selection, and NEVER disable SHA-256 verification.
-$assetPath = "PortableApps.com%20Installer/$installerFilename"
-$mirrorUrls = @(
-    "https://sourceforge.net/projects/portableapps/files/$assetPath/download?use_mirror=autoselect",
-    "https://downloads.sourceforge.net/project/portableapps/$assetPath`?use_mirror=netix",
-    "https://downloads.sourceforge.net/project/portableapps/$assetPath`?use_mirror=phoenixnap",
-    "https://downloads.sourceforge.net/project/portableapps/$assetPath`?use_mirror=master",
-    "https://downloads.sourceforge.net/project/portableapps/$assetPath`?use_mirror=autoselect",
-    "https://netix.dl.sourceforge.net/project/portableapps/$assetPath",
-    "https://phoenixnap.dl.sourceforge.net/project/portableapps/$assetPath"
-)
-$verified = $false
-$downloadDiagnostics = [System.Collections.Generic.List[string]]::new()
-Write-Host "Downloading and verifying PortableApps.com Installer $installerVersion from official SourceForge mirrors"
-foreach ($candidate in $mirrorUrls) {
-    if ($verified) { break }
-    try {
-        if (Test-Path -LiteralPath $downloadFile) {
-            Remove-Item -LiteralPath $downloadFile -Force
-        }
-        $mirrorLabel = ([uri]$candidate).Host + ' (mirror selection)'
-        Write-Host "Trying official download service: $mirrorLabel"
-        Invoke-WebRequest -Uri $candidate -OutFile $downloadFile -MaximumRedirection 10 -TimeoutSec 90 `
-            -Headers @{ 'User-Agent' = 'Mozilla/5.0 (compatible; VSCodiumPortableBuilder/1.0)' } -ErrorAction Stop
-
-        $downloaded = Get-Item -LiteralPath $downloadFile
-        $actualSha = (Get-FileHash -LiteralPath $downloadFile -Algorithm SHA256).Hash.ToLowerInvariant()
-        $headBytes = [byte[]]::new(2)
-        $stream = [System.IO.File]::OpenRead($downloadFile)
-        try { $bytesRead = $stream.Read($headBytes, 0, 2) }
-        finally { $stream.Dispose() }
-        $validPE = ($bytesRead -eq 2 -and $headBytes[0] -eq 0x4D -and $headBytes[1] -eq 0x5A)
-        $sizeMB = [math]::Round($downloaded.Length / 1MB, 2)
-        if ($actualSha -eq $installerSha -and $validPE) {
-            $verified = $true
-            Write-Host "SUCCESS: official Installer SHA-256 verified; $sizeMB MB; executable signature valid."
-        } else {
-            $detail = "Unverified response from $mirrorLabel; size=$sizeMB MB; executable=$validPE; sha256=$actualSha"
-            Write-Warning $detail
-            $downloadDiagnostics.Add($detail)
-        }
-    } catch {
-        $detail = "Download failed at $(([uri]$candidate).Host): $($_.Exception.Message)"
-        Write-Warning $detail
-        $downloadDiagnostics.Add($detail)
-    }
-}
-if (-not $verified) {
-    if (Test-Path -LiteralPath $downloadFile) {
-        Remove-Item -LiteralPath $downloadFile -Force
-    }
-    $details = $downloadDiagnostics -join [Environment]::NewLine
-    throw "No SourceForge mirror returned the VERIFIED PortableApps.com Installer $installerVersion. Expected SHA256=$installerSha. Never bypass this check. Details:`n$details"
-}
-
-
-# The source package is itself a .paf.exe. Install the packager to a temporary
-# directory on this short-lived GitHub Windows machine, not to the user's PC.
-# PortableApps.com's NSIS installers support /S (silent) and /DESTINATION.
-Write-Host 'Unpacking PortableApps.com Installer on the temporary GitHub runner.'
-$toolInstaller = Start-Process -FilePath $downloadFile -ArgumentList @('/S', "/DESTINATION=$installRoot\") -PassThru
+$toolExtract = Join-Path $workRoot 'extracted-tool'
+New-Item -ItemType Directory -Force -Path $workRoot, $toolExtract, $outputRoot | Out-Null
+$releaseUrl = "https://github.com/$repoName/releases/download/$releaseTag/$installerFilename"
+Write-Host "Retrieving PortableApps.com Installer $installerVersion from release '$releaseTag' in $repoName"
+Write-Host 'This build does not contact SourceForge.'
 try {
-    if (-not $toolInstaller.WaitForExit(180000)) {
-        try { $toolInstaller.Kill() } catch { }
-        throw 'The PortableApps.com Installer setup timed out (3 minutes).'
-    }
-    if ($toolInstaller.ExitCode -ne 0) { throw "PortableApps.com Installer setup failed with exit code $($toolInstaller.ExitCode)" }
-} finally {
-    $toolInstaller.Dispose()
+    Invoke-WebRequest -Uri $releaseUrl -OutFile $downloadFile -MaximumRedirection 10 -TimeoutSec 120 -ErrorAction Stop
+} catch {
+    throw "Could not download $installerFilename from the GitHub Release '$releaseTag'. Create that release and attach the original publisher file to it first. See START-HERE.txt. Error: $($_.Exception.Message)"
 }
-$exeTools = @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Filter 'PortableApps.comInstaller.exe')
+
+# Verify exact PUBLISHER checksum, never a checksum from the GitHub upload.
+$actualSha = (Get-FileHash -LiteralPath $downloadFile -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualSha -ne $installerSha) {
+    Remove-Item -LiteralPath $downloadFile -Force
+    throw "Installer checksum does not match the official publisher SHA-256. Expected $installerSha, got $actualSha. Re-download the original publisher package, do not bypass this check."
+}
+$stream = [System.IO.File]::OpenRead($downloadFile)
+try {
+    $signature = [byte[]]::new(2)
+    if ($stream.Read($signature, 0, 2) -ne 2 -or $signature[0] -ne 0x4d -or $signature[1] -ne 0x5a) {
+        throw 'Verified installer is not a valid Windows EXE (MZ header missing).'
+    }
+} finally { $stream.Dispose() }
+Write-Host 'Verified against the official PortableApps.com Installer publisher SHA-256.'
+
+# Prefer archive extraction: it does not rely on silently opening an installer GUI
+# inside a GitHub Actions Windows session. Windows hosted runners commonly have
+# 7-Zip preinstalled; when unavailable, fall back to the installer itself.
+$sevenZipCandidates = @(
+    'C:\Program Files\7-Zip\7z.exe',
+    'C:\Program Files (x86)\7-Zip\7z.exe'
+)
+$sevenZip = $null
+foreach ($candidate in $sevenZipCandidates) {
+    if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+        $sevenZip = $candidate
+        break
+    }
+}
+if (-not $sevenZip) {
+    $command = Get-Command '7z.exe' -ErrorAction SilentlyContinue
+    if ($command) { $sevenZip = $command.Source }
+}
+if ($sevenZip) {
+    Write-Host 'Extracting the verified official installer archive with 7-Zip.'
+    & $sevenZip x -y "-o$toolExtract" $downloadFile | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "7-Zip could not extract the NSIS package (exit code $LASTEXITCODE)."
+    }
+} else {
+    Write-Warning '7-Zip is not available; trying silent installation instead.'
+}
+
+$exeTools = @(Get-ChildItem -LiteralPath $toolExtract -Recurse -File -Filter 'PortableApps.comInstaller.exe' -ErrorAction SilentlyContinue)
+if ($exeTools.Count -eq 0) {
+    # Backup approach: PortableApps.com's own /S and /DESTINATION argument.
+    # /DESTINATION takes a parent folder with trailing backslash.
+    $installRoot = Join-Path $workRoot 'portableapps-tools'
+    New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+    $dest = $installRoot.TrimEnd('\') + '\'
+    Write-Host 'Attempting to install official packaging tool into temporary runner directory.'
+    $toolInstaller = Start-Process -FilePath $downloadFile -ArgumentList @('/S', "/DESTINATION=$dest") -PassThru
+    try {
+        if (-not $toolInstaller.WaitForExit(120000)) {
+            try { $toolInstaller.Kill() } catch { }
+            throw 'PortableApps installer bootstrap timed out; needs a different headless install method.'
+        }
+        if ($toolInstaller.ExitCode -ne 0) { throw "PortableApps packager bootstrap returned code $($toolInstaller.ExitCode)" }
+    } finally { $toolInstaller.Dispose() }
+    $exeTools = @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Filter 'PortableApps.comInstaller.exe')
+}
 if ($exeTools.Count -ne 1) {
-    throw "Expected one installed PortableApps.comInstaller.exe; found $($exeTools.Count)."
+    throw "Cannot find one PortableApps.comInstaller.exe in the VERIFIED publisher package (found $($exeTools.Count)). Further investigation of installer internals is needed; do not substitute an unverified executable."
 }
 $packer = $exeTools[0].FullName
 Write-Host 'Building a PAF from stage\VSCodiumPortable with official PortableApps.com Installer.'
