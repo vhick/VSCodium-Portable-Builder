@@ -43,7 +43,6 @@ foreach ($icon in @('appicon.ico', 'appicon_16.png', 'appicon_32.png')) {
 $installerIni = @'
 [MainDirectories]
 RemoveAppDirectory=true
-RemoveDataDirectory=false
 RemoveOtherDirectory=true
 '@
 Set-Content -LiteralPath (Join-Path $infoRoot 'installer.ini') -Value $installerIni -Encoding ascii
@@ -54,18 +53,68 @@ Set-Content -LiteralPath (Join-Path $infoRoot 'installer.ini') -Value $installer
 $installerVersion = '3.9.22'
 $installerSha = '689456f1fb1320c45e82a077afe6b87fb388fd3f75c41d9ee9ce8d45f3966b67'
 $installerFilename = "PortableApps.comInstaller_$installerVersion.paf.exe"
-$installerUrl = "https://downloads.sourceforge.net/project/portableapps/PortableApps.com%20Installer/${installerFilename}?download"
 $workRoot = Join-Path $env:RUNNER_TEMP 'vscodium-paf-tools'
 $downloadFile = Join-Path $workRoot $installerFilename
 $installRoot = Join-Path $workRoot 'portableapps-tools'
 New-Item -ItemType Directory -Force -Path $workRoot, $installRoot, $outputRoot | Out-Null
-Write-Host "Downloading official PortableApps.com Installer $installerVersion"
-Invoke-WebRequest -Uri $installerUrl -OutFile $downloadFile -MaximumRedirection 10 -ErrorAction Stop
-$actualSha = (Get-FileHash -LiteralPath $downloadFile -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actualSha -ne $installerSha) {
-    throw "Official installer checksum mismatch ($actualSha). Stopping safely."
+
+# SourceForge can return an error page or a stale mirror response instead of the
+# official executable. Download from the publisher's official mirror network,
+# retry via documented mirror selection, and NEVER disable SHA-256 verification.
+$assetPath = "PortableApps.com%20Installer/$installerFilename"
+$mirrorUrls = @(
+    "https://sourceforge.net/projects/portableapps/files/$assetPath/download?use_mirror=autoselect",
+    "https://downloads.sourceforge.net/project/portableapps/$assetPath`?use_mirror=netix",
+    "https://downloads.sourceforge.net/project/portableapps/$assetPath`?use_mirror=phoenixnap",
+    "https://downloads.sourceforge.net/project/portableapps/$assetPath`?use_mirror=master",
+    "https://downloads.sourceforge.net/project/portableapps/$assetPath`?use_mirror=autoselect",
+    "https://netix.dl.sourceforge.net/project/portableapps/$assetPath",
+    "https://phoenixnap.dl.sourceforge.net/project/portableapps/$assetPath"
+)
+$verified = $false
+$downloadDiagnostics = [System.Collections.Generic.List[string]]::new()
+Write-Host "Downloading and verifying PortableApps.com Installer $installerVersion from official SourceForge mirrors"
+foreach ($candidate in $mirrorUrls) {
+    if ($verified) { break }
+    try {
+        if (Test-Path -LiteralPath $downloadFile) {
+            Remove-Item -LiteralPath $downloadFile -Force
+        }
+        $mirrorLabel = ([uri]$candidate).Host + ' (mirror selection)'
+        Write-Host "Trying official download service: $mirrorLabel"
+        Invoke-WebRequest -Uri $candidate -OutFile $downloadFile -MaximumRedirection 10 -TimeoutSec 90 `
+            -Headers @{ 'User-Agent' = 'Mozilla/5.0 (compatible; VSCodiumPortableBuilder/1.0)' } -ErrorAction Stop
+
+        $downloaded = Get-Item -LiteralPath $downloadFile
+        $actualSha = (Get-FileHash -LiteralPath $downloadFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        $headBytes = [byte[]]::new(2)
+        $stream = [System.IO.File]::OpenRead($downloadFile)
+        try { $bytesRead = $stream.Read($headBytes, 0, 2) }
+        finally { $stream.Dispose() }
+        $validPE = ($bytesRead -eq 2 -and $headBytes[0] -eq 0x4D -and $headBytes[1] -eq 0x5A)
+        $sizeMB = [math]::Round($downloaded.Length / 1MB, 2)
+        if ($actualSha -eq $installerSha -and $validPE) {
+            $verified = $true
+            Write-Host "SUCCESS: official Installer SHA-256 verified; $sizeMB MB; executable signature valid."
+        } else {
+            $detail = "Unverified response from $mirrorLabel; size=$sizeMB MB; executable=$validPE; sha256=$actualSha"
+            Write-Warning $detail
+            $downloadDiagnostics.Add($detail)
+        }
+    } catch {
+        $detail = "Download failed at $(([uri]$candidate).Host): $($_.Exception.Message)"
+        Write-Warning $detail
+        $downloadDiagnostics.Add($detail)
+    }
 }
-Write-Host 'Official PortableApps.com Installer SHA-256 verified.'
+if (-not $verified) {
+    if (Test-Path -LiteralPath $downloadFile) {
+        Remove-Item -LiteralPath $downloadFile -Force
+    }
+    $details = $downloadDiagnostics -join [Environment]::NewLine
+    throw "No SourceForge mirror returned the VERIFIED PortableApps.com Installer $installerVersion. Expected SHA256=$installerSha. Never bypass this check. Details:`n$details"
+}
+
 
 # The source package is itself a .paf.exe. Install the packager to a temporary
 # directory on this short-lived GitHub Windows machine, not to the user's PC.
