@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "Official VSCodium stable release (example: 1.140.06880)"
+        description: "Official stable VSCodium release (example: 1.140.06880)"
         type: string
         required: true
         default: "1.140.06880"
@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   package-windows-portable:
-    name: Package official Windows portable ZIP
+    name: Build App / Data / Other portable ZIP
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -38,21 +38,36 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Test packaging and portable-folder safety
+      - name: Test packaging and portable layout safety
         shell: pwsh
         run: python -m unittest discover -s tests -v
 
-      - name: Download and verify official VSCodium release; create portable ZIP
+      - name: Download, verify and stage official VSCodium Windows ZIP
         shell: pwsh
         env:
           VSCODIUM_VERSION: ${{ inputs.release_version }}
           VSCODIUM_ARCHITECTURE: ${{ inputs.architecture }}
           GITHUB_API_TOKEN: ${{ github.token }}
         run: |
-          python builder/build_portable.py --version "$env:VSCODIUM_VERSION" --architecture "$env:VSCODIUM_ARCHITECTURE"
-          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed. Check the error above.' }
+          python builder/build_portable.py --version "$env:VSCODIUM_VERSION" --architecture "$env:VSCODIUM_ARCHITECTURE" --output-dir stage
+          if ($LASTEXITCODE -ne 0) { throw 'Official VSCodium download/staging failed.' }
 
-      - name: Upload ZIP for download
+      - name: Compile VSCodiumPortable.exe and generate application icons
+        shell: pwsh
+        run: |
+          & ./builder/compile_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher compilation failed.' }
+
+      - name: Assemble ZIP and verify App Data Other layout
+        shell: pwsh
+        env:
+          VSCODIUM_VERSION: ${{ inputs.release_version }}
+          VSCODIUM_ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          python builder/package_staged.py --version "$env:VSCODIUM_VERSION" --architecture "$env:VSCODIUM_ARCHITECTURE"
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging verification failed.' }
+
+      - name: Upload downloadable portable ZIP
         uses: actions/upload-artifact@v4
         with:
           name: VSCodium-TruePortable-${{ inputs.release_version }}-${{ inputs.architecture }}
